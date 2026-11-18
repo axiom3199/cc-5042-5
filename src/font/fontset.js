@@ -2,6 +2,11 @@
 // fallback fonts. Every glyph records which font actually produced it;
 // missing glyphs (no coverage anywhere) use the primary font's .notdef
 // and are flagged explicitly.
+//
+// Coordinate validation is delegated to each font's AxisSpace. The primary
+// font's resolution is the one reported to the UI, and every font reports
+// the axes it does not declare (unsupported) rather than silently folding
+// them into defaults.
 
 export class FontSet {
   constructor(fonts) {
@@ -19,6 +24,9 @@ export class FontSet {
     const cps = [...text].map((ch) => ch.codePointAt(0));
     const primary = this.primary;
 
+    // Resolve coordinates once per font (cheap, cached by AxisSpace key).
+    const resolved = this.fonts.map((font) => font.normalize(userLocation));
+
     // Assign each codepoint to the first font that covers it.
     const assignments = cps.map((cp) => {
       for (let fi = 0; fi < this.fonts.length; fi++) {
@@ -31,7 +39,6 @@ export class FontSet {
     // Group consecutive same-font glyphs into runs so kerning applies
     // within a run only (never across different fonts).
     const glyphs = new Array(cps.length);
-    const runInfo = [];
     let i = 0;
     const unsupportedByFont = new Map();
     while (i < cps.length) {
@@ -40,7 +47,7 @@ export class FontSet {
       while (j < cps.length && assignments[j].fontIndex === fi) j++;
       if (fi === -1) {
         // Missing run: use primary font's .notdef.
-        const { clamped, normalized } = primary.normalize(userLocation);
+        const primaryNorm = resolved[0];
         for (let k = i; k < j; k++) {
           glyphs[k] = {
             cp: cps[k],
@@ -49,10 +56,10 @@ export class FontSet {
             fontIndex: 0,
             missing: true,
             fallback: false,
-            advance: primary.advance(0, normalized),
+            advance: primary.advance(0, primaryNorm.normalized),
             xOffset: 0,
             yOffset: 0,
-            normalized,
+            normalized: primaryNorm.normalized,
           };
         }
       } else {
@@ -75,12 +82,14 @@ export class FontSet {
       i = j;
     }
 
-    const primaryNorm = primary.normalize(userLocation);
+    const primaryNorm = resolved[0];
     return {
       glyphs,
       clamped: primaryNorm.clamped,
       normalized: primaryNorm.normalized,
       unsupported: primaryNorm.unsupported,
+      invalid: primaryNorm.invalid,
+      adjusted: primaryNorm.adjusted,
       unsupportedByFont: [...unsupportedByFont.entries()].map(([fi, tags]) => ({
         fontIndex: fi,
         tags,

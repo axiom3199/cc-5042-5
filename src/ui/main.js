@@ -1,10 +1,12 @@
-// UI wiring: builds axis controls from the font's actual fvar table,
-// renders the poster from real shaped/laid-out glyph data, and surfaces
-// applied coordinates, unsupported axes, fallback and missing glyphs.
+// UI wiring: builds axis controls from the font's AxisSpace (the same axis
+// interface the engine uses), and renders the poster through the split
+// shape/place layout stages. Shape results are reused while the text and
+// normalized location are unchanged; option-only edits re-place without
+// re-evaluating glyphs.
 import { Font } from "../font/font.js";
 import { FontSet } from "../font/fontset.js";
-import { layoutPoster } from "../font/layout.js";
-import { renderPoster, COLORS } from "./poster.js";
+import { shapeText, placeLines } from "../font/layout.js";
+import { renderPoster } from "./poster.js";
 
 const $ = (id) => document.getElementById(id);
 const canvas = $("poster");
@@ -20,6 +22,10 @@ const state = {
   showMetrics: false,
   hits: [],
   layout: null,
+  // Shape stage output, reused while text + normalized location are stable.
+  // fontSet identity is part of the check so an uploaded font never reuses
+  // the previous font's shape.
+  shapeCache: { key: null, fontSet: null, value: null },
 };
 
 function showError(msg) {
@@ -63,22 +69,24 @@ function defaultText() {
 
 function buildAxisUI() {
   const font = state.fontSet.primary;
+  const space = font.axisSpace; // the same interface the engine validates with
   const host = $("axes");
   host.innerHTML = "";
-  const hasAxes = font.axes.length > 0;
+  const hasAxes = space.axes.length > 0;
   $("noAxes").hidden = hasAxes;
-  $("instanceRow").hidden = !(hasAxes && font.instances.length);
+  $("instanceRow").hidden = !(hasAxes && space.instances.length);
 
   // Drop coordinates for axes this font doesn't have? No — keep them in
   // state so the "unsupported axis" warning demonstrates that they are
-  // NOT applied. But ensure every supported axis has a value.
-  for (const axis of font.axes) {
+  // NOT applied. But ensure every supported axis has a value, seeded from
+  // AxisSpace rather than a hard-coded default.
+  for (const axis of space.axes) {
     if (typeof state.location[axis.tag] !== "number") {
-      state.location[axis.tag] = axis.default;
+      state.location[axis.tag] = space.validateValue(axis.tag, undefined).value;
     }
   }
 
-  for (const axis of font.axes) {
+  for (const axis of space.axes) {
     const div = document.createElement("div");
     div.className = "axis";
     const step = (axis.max - axis.min) / 400 || 0.01;
@@ -103,16 +111,19 @@ function buildAxisUI() {
     div.querySelector(".lo").textContent = axis.min;
     div.querySelector(".def").textContent = `默认 ${axis.default}`;
     div.querySelector(".hi").textContent = axis.max;
-    const onInput = (v) => {
-      state.location[axis.tag] = v;
-      slider.value = v;
-      num.value = round2(v);
+    const onInput = (raw) => {
+      // Keep what the user asked for; the engine's axis pipeline reports
+      // clamping/invalid values. Controls display the applied value.
+      state.location[axis.tag] = raw;
+      const check = space.validateValue(axis.tag, raw);
+      slider.value = check.value;
+      num.value = round2(check.value);
       render();
     };
     slider.addEventListener("input", () => onInput(parseFloat(slider.value)));
     num.addEventListener("change", () => {
       const v = parseFloat(num.value);
-      onInput(Number.isFinite(v) ? v : axis.default);
+      onInput(Number.isFinite(v) ? v : Number.NaN);
     });
     host.appendChild(div);
   }
@@ -123,10 +134,10 @@ function buildAxisUI() {
   ph.value = "";
   ph.textContent = "选择预设…";
   inst.appendChild(ph);
-  font.instances.forEach((ins, i) => {
+  space.instances.forEach((ins, i) => {
     const opt = document.createElement("option");
     opt.value = String(i);
-    opt.textContent = `${ins.name} — ${font.axes.map((a) => `${a.tag}=${ins.coords[a.tag]}`).join(" ")}`;
+    opt.textContent = `${ins.name} — ${space.axes.map((a) => `${a.tag}=${ins.coords[a.tag]}`).join(" ")}`;
     inst.appendChild(opt);
   });
 }
@@ -142,7 +153,22 @@ function render() {
   try {
     const stage = $("stage");
     const width = Math.max(480, Math.min(1600, stage.clientWidth - 36));
-    const layout = layoutPoster(state.fontSet, state.text, state.location, {
+    // Shape stage: axis location + text. The cache key uses each font's
+    // resolved normalized location, so raw values that clamp to the same
+    // point share one shape, while any real axis change re-enters shaping.
+    // (Including fallback fonts matters when the primary is static.)
+    const normalizedKey = state.fontSet.fonts
+      .map((f) =>
+        f.axisSpace.locationKey(f.normalize(state.location).normalized)
+      )
+      .join("|");
+    const shapeKey = `${normalizedKey}\u0000${state.text}`;
+    if (state.shapeCache.key !== shapeKey || state.shapeCache.fontSet !== state.fontSet) {
+      const shaped = shapeText(state.fontSet, state.text, state.location);
+      state.shapeCache = { key: shapeKey, fontSet: state.fontSet, value: shaped };
+    }
+    const { shapedLines, shaped, metrics } = state.shapeCache.value;
+    const options = {
       fontSize: state.fontSize,
       lineHeightFactor: state.lineHeightFactor,
       letterSpacing: state.letterSpacing,
@@ -150,7 +176,8 @@ function render() {
       width,
       padding: 48,
       height: 800,
-    });
+    };
+    const layout = placeLines(state.fontSet, shapedLines, shaped, metrics, options);
     // Grow the canvas to fit all lines.
     const primaryScale = state.fontSize / state.fontSet.primary.unitsPerEm;
     const last = layout.lines[layout.lines.length - 1];
@@ -162,6 +189,8 @@ function render() {
     state.hits = renderPoster(canvas, layout, state.fontSet, {
       showMetrics: state.showMetrics,
     });
+    // Read-only inspection hook for the browser smoke test.
+    globalThis.__posterState = state;
     updateReadouts(layout);
   } catch (err) {
     console.error(err);
@@ -176,14 +205,14 @@ function updateReadouts(layout) {
   // Applied coordinates table (clamped user values + post-avar normalized).
   const tbody = $("coordTable").querySelector("tbody");
   tbody.innerHTML = "";
-  if (font.axes.length === 0) {
+  if (font.axisSpace.axes.length === 0) {
     const tr = tbody.insertRow();
     const td = tr.insertCell();
     td.colSpan = 3;
     td.textContent = "（静态字体，无可变坐标）";
     td.style.textAlign = "left";
   }
-  for (const axis of font.axes) {
+  for (const axis of font.axisSpace.axes) {
     const tr = tbody.insertRow();
     tr.insertCell().textContent = axis.tag;
     tr.insertCell().textContent = round2(shaped.clamped[axis.tag]);
@@ -197,6 +226,20 @@ function updateReadouts(layout) {
     const div = document.createElement("div");
     div.className = "warn";
     div.textContent = `轴 “${tag}” 不被 ${font.familyName} 支持，已忽略（未生效）。`;
+    warnHost.appendChild(div);
+  }
+  // Values that could not be used are surfaced instead of looking applied.
+  for (const entry of shaped.invalid ?? []) {
+    const div = document.createElement("div");
+    div.className = "warn";
+    div.textContent = `轴 “${entry.tag}” 的输入值 ${JSON.stringify(entry.raw)} 无效（${entry.reason}），改用 ${entry.applied}。`;
+    warnHost.appendChild(div);
+  }
+  // Finite values clamped into range are reported as clamped, not accepted.
+  for (const entry of shaped.adjusted ?? []) {
+    const div = document.createElement("div");
+    div.className = "warn";
+    div.textContent = `轴 “${entry.tag}” 的输入值 ${entry.raw} 超出范围，已截断为 ${entry.applied}。`;
     warnHost.appendChild(div);
   }
   for (const entry of shaped.unsupportedByFont) {
@@ -239,8 +282,8 @@ canvas.addEventListener("click", (ev) => {
     g.missing ? `<span class="badge missing">缺字 .notdef</span>` : "",
     g.fallback ? `<span class="badge fallback">回退字体</span>` : "",
   ].join("");
-  const coordStr = font.axes.length
-    ? font.axes.map((a) => `${a.tag}=${(g.normalized[a.tag] ?? 0).toFixed(3)}`).join(" ")
+  const coordStr = font.axisSpace.axes.length
+    ? font.axisSpace.axes.map((a) => `${a.tag}=${(g.normalized[a.tag] ?? 0).toFixed(3)}`).join(" ")
     : "（静态）";
   host.innerHTML = `
     <p>${badges}</p>
@@ -298,13 +341,14 @@ function bindControls() {
   $("instances").addEventListener("change", () => {
     const i = $("instances").value;
     if (i === "") return;
-    const ins = state.fontSet.primary.instances[Number(i)];
+    const ins = state.fontSet.primary.axisSpace.instances[Number(i)];
     Object.assign(state.location, ins.coords);
     buildAxisUI();
     render();
   });
   $("resetAxes").addEventListener("click", () => {
-    for (const axis of state.fontSet.primary.axes) state.location[axis.tag] = axis.default;
+    const space = state.fontSet.primary.axisSpace;
+    for (const axis of space.axes) state.location[axis.tag] = space.validateValue(axis.tag, undefined).value;
     buildAxisUI();
     render();
   });
@@ -344,8 +388,9 @@ function bindControls() {
 
 function updateHeader() {
   const p = state.fontSet.primary;
-  const axisInfo = p.axes.length
-    ? `${p.axes.length} 个可变轴：${p.axes.map((a) => `${a.name}(${a.tag})`).join("、")}`
+  const space = p.axisSpace;
+  const axisInfo = space.axes.length
+    ? `${space.axes.length} 个可变轴：${space.axes.map((a) => `${a.name}(${a.tag})`).join("、")}`
     : "静态字体";
   $("fontName").textContent = `${p.familyName} — ${axisInfo}；回退：${state.fontSet.fonts
     .slice(1)
@@ -354,7 +399,7 @@ function updateHeader() {
   $("fontList").innerHTML = state.fontSet.fonts
     .map(
       (f, i) =>
-        `#${i} ${escapeHtml(f.familyName)} — upm ${f.unitsPerEm}，${f.numGlyphs} 字形，${f.axes.length} 轴`
+        `#${i} ${escapeHtml(f.familyName)} — upm ${f.unitsPerEm}，${f.numGlyphs} 字形，${f.axisSpace.axes.length} 轴`
     )
     .join("<br>");
 }
@@ -367,7 +412,9 @@ async function main() {
   state.fontSet = new FontSet([noto, dejavu]);
   state.text = defaultText();
   $("text").value = state.text;
-  for (const axis of noto.axes) state.location[axis.tag] = axis.default;
+  for (const axis of noto.axisSpace.axes) {
+    state.location[axis.tag] = noto.axisSpace.validateValue(axis.tag, undefined).value;
+  }
   updateHeader();
   buildAxisUI();
   bindControls();

@@ -1,5 +1,6 @@
-// fvar (axes + named instances), avar (axis value mapping), and the
-// normalization pipeline: user coords -> clamped -> [-1,1] -> avar-mapped.
+// fvar (axes + named instances) and avar (axis value mapping) table parsing.
+// The normalization/avar pipeline lives in axes.js (AxisSpace), which owns
+// the shared range validation used by every entry point.
 
 export function parseFvar(reader, tableOffset, nameTable) {
   const r = reader.sub(tableOffset);
@@ -66,53 +67,4 @@ export function parseAvar(reader, tableOffset) {
     segments.set(axis, segs);
   }
   return { segments };
-}
-
-function piecewiseLinearMap(value, segs) {
-  if (!segs || segs.length === 0) return value;
-  if (value <= segs[0].from) return segs[0].to;
-  if (value >= segs[segs.length - 1].from) return segs[segs.length - 1].to;
-  for (let i = 0; i < segs.length - 1; i++) {
-    const a = segs[i], b = segs[i + 1];
-    if (value >= a.from && value <= b.from) {
-      if (b.from === a.from) return a.to;
-      const t = (value - a.from) / (b.from - a.from);
-      return a.to + t * (b.to - a.to);
-    }
-  }
-  return value;
-}
-
-// Mirrors fontTools.models.normalizeLocation: clamp to [min,max], then scale
-// to [-1,1] around the default. Returns {clamped, normalized}.
-export function normalizeLocation(location, axes) {
-  const clamped = {};
-  const normalized = {};
-  for (const axis of axes) {
-    let v = location[axis.tag];
-    if (typeof v !== "number" || Number.isNaN(v)) v = axis.default;
-    v = Math.min(axis.max, Math.max(axis.min, v));
-    clamped[axis.tag] = v;
-    let n;
-    if (v < axis.default) {
-      n = axis.default === axis.min ? 0 : (v - axis.default) / (axis.default - axis.min);
-    } else if (v > axis.default) {
-      n = axis.max === axis.default ? 0 : (v - axis.default) / (axis.max - axis.default);
-    } else {
-      n = 0;
-    }
-    normalized[axis.tag] = Math.max(-1, Math.min(1, n));
-  }
-  return { clamped, normalized };
-}
-
-export function applyAvar(normalized, axes, avar) {
-  if (!avar) return { ...normalized };
-  const out = {};
-  for (let i = 0; i < axes.length; i++) {
-    const tag = axes[i].tag;
-    const v = normalized[tag] ?? 0;
-    out[tag] = piecewiseLinearMap(v, avar.segments.get(i));
-  }
-  return out;
 }

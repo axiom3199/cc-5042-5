@@ -1,9 +1,18 @@
-// Text layout: turns shaped glyphs into positioned lines. Pen positions are
-// derived from the actual (variation-adjusted) advances and kerning of each
-// glyph — nothing is reused across axis changes, so glyphs never collide
-// because of stale metrics.
+// Text layout, split into two independent stages so callers can see what an
+// axis change invalidates:
+//
+//   shapeText()  text + axis location -> shaped glyph runs and metrics
+//                (invalidated by axis location or text)
+//   placeLines() shaped runs + options -> positioned lines
+//                (invalidated by options; axis changes re-enter via shape)
+//   layoutPoster() the original combined entry point (kept as a thin wrapper
+//                so existing callers, including the poster UI, keep working).
+//
+// Pen positions are derived from the actual (variation-adjusted) advances
+// and kerning of each glyph — nothing is reused across axis changes, so
+// glyphs never collide because of stale metrics.
 
-export function layoutPoster(fontSet, text, userLocation, options = {}) {
+export function resolveLayoutOptions(options = {}) {
   const {
     fontSize = 120,
     lineHeight = null, // px; null -> derived from font metrics * lineHeightFactor
@@ -14,16 +23,32 @@ export function layoutPoster(fontSet, text, userLocation, options = {}) {
     width = 1200,
     height = 800,
   } = options;
+  return { fontSize, lineHeight, lineHeightFactor, letterSpacing, padding, align, width, height };
+}
 
+// Shape each paragraph separately so kerning never crosses a line break and
+// the newline itself is never shaped as a (missing) glyph.
+export function shapeText(fontSet, text, userLocation = {}) {
   const primary = fontSet.primary;
-
-  // Shape per paragraph so kerning never crosses a line break and the
-  // newline itself is never shaped as a (missing) glyph.
   const paragraphs = text.split("\n");
   const shapedLines = paragraphs.map((p) => fontSet.shape(p, userLocation));
   const shaped = mergeShaped(shapedLines);
-
   const metrics = primary.metricsFor(shaped.normalized);
+  return { shapedLines, shaped, metrics };
+}
+
+export function placeLines(fontSet, shapedLines, shaped, metrics, options = {}) {
+  const {
+    fontSize,
+    lineHeight,
+    lineHeightFactor,
+    letterSpacing,
+    padding,
+    align,
+    width,
+    height,
+  } = resolveLayoutOptions(options);
+
   const scaleOf = (fontIndex) => fontSize / fontSet.fonts[fontIndex].unitsPerEm;
   const primaryScale = scaleOf(0);
 
@@ -63,7 +88,14 @@ export function layoutPoster(fontSet, text, userLocation, options = {}) {
     height,
     padding,
     fontSize,
+    options: { ...resolveLayoutOptions(options) },
   };
+}
+
+// Combined entry point: shape then place.
+export function layoutPoster(fontSet, text, userLocation, options = {}) {
+  const { shapedLines, shaped, metrics } = shapeText(fontSet, text, userLocation);
+  return placeLines(fontSet, shapedLines, shaped, metrics, options);
 }
 
 // Combine per-paragraph shape results into one full-text result.
@@ -71,12 +103,16 @@ function mergeShaped(shapedLines) {
   const first = shapedLines[0];
   const glyphs = [];
   const byFont = new Map();
+  const invalid = [];
+  const adjusted = [];
   let missingCount = 0;
   let fallbackCount = 0;
   for (const sl of shapedLines) {
     glyphs.push(...sl.glyphs);
     missingCount += sl.missingCount;
     fallbackCount += sl.fallbackCount;
+    invalid.push(...(sl.invalid ?? []));
+    adjusted.push(...(sl.adjusted ?? []));
     for (const entry of sl.unsupportedByFont) {
       if (!byFont.has(entry.fontIndex)) byFont.set(entry.fontIndex, new Set());
       for (const t of entry.tags) byFont.get(entry.fontIndex).add(t);
@@ -87,6 +123,8 @@ function mergeShaped(shapedLines) {
     clamped: first.clamped,
     normalized: first.normalized,
     unsupported: first.unsupported,
+    invalid,
+    adjusted,
     unsupportedByFont: [...byFont.entries()].map(([fontIndex, tags]) => ({
       fontIndex,
       tags: [...tags],

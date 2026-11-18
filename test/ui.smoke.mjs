@@ -77,27 +77,86 @@ async function main() {
     const sliders = await page.locator("#axes .axis").count();
     assert.equal(sliders, 2, "Noto wdth,wght axes -> 2 sliders");
 
-    // 3. Moving wght to an endpoint changes the rendered pixels AND the
-    //    applied-coordinates readout.
+    // 3. Moving wght to an endpoint changes the rendered pixels, the
+    //    applied-coordinates readout AND the measured line extent.
+    const readLayout = () =>
+      page.evaluate(() => {
+        const l = globalThis.__posterState?.layout;
+        return l
+          ? {
+              width: l.lines.map((line) => line.width),
+              normalized: { ...l.shaped.normalized },
+              advances: l.lines.flatMap((line) => line.glyphs.map((g) => g.advance)),
+            }
+          : null;
+      });
     const wghtSlider = page.locator("#axes .axis").nth(0).locator(".axis-slider");
     const tag0 = await page.locator("#axes .axis").nth(0).locator(".axis-tag").textContent();
     const coordBefore = await page.locator("#coordTable tbody").textContent();
+    const layout1 = await readLayout();
     await wghtSlider.fill(tag0.includes("wght") ? "900" : "62.5");
     await page.waitForTimeout(200);
     const stats2 = await canvasStats(page);
     const coordAfter = await page.locator("#coordTable tbody").textContent();
+    const layout2 = await readLayout();
     assert.notEqual(coordBefore, coordAfter, "applied coords readout must follow the slider");
     assert.ok(
       Math.abs(stats2.ink - stats1.ink) > 100,
       `axis change must re-render outlines (ink ${stats1.ink} -> ${stats2.ink})`
     );
+    assert.ok(layout1 && layout2, "layout is inspectable");
+    assert.notDeepEqual(layout2.width, layout1.width, "axis change moves layout extents");
+    assert.notDeepEqual(layout2.advances, layout1.advances, "axis change moves advances");
 
     // 4. Both axis extremes produce different ink than default.
     const wghtSlider2 = page.locator("#axes .axis").nth(0).locator(".axis-slider");
     await wghtSlider2.fill(tag0.includes("wght") ? "100" : "100");
     await page.waitForTimeout(200);
     const stats3 = await canvasStats(page);
+    const layout3 = await readLayout();
     assert.ok(Math.abs(stats3.ink - stats2.ink) > 100, "opposite endpoint differs again");
+    assert.notDeepEqual(layout3.advances, layout2.advances, "opposite endpoint moves advances");
+
+    // 4b. Multi-axis coupling: the second axis also changes glyph shape and
+    //     the layout readout, not just a uniform scale.
+    const secondSlider = page.locator("#axes .axis").nth(1).locator(".axis-slider");
+    const secondTag = await page.locator("#axes .axis").nth(1).locator(".axis-tag").textContent();
+    const coords2Before = await page.locator("#coordTable tbody").textContent();
+    await secondSlider.fill(secondTag.includes("wdth") ? "62.5" : "900");
+    await page.waitForTimeout(200);
+    const stats4 = await canvasStats(page);
+    const coords2After = await page.locator("#coordTable tbody").textContent();
+    const layout4 = await readLayout();
+    assert.notEqual(coords2Before, coords2After, "second axis readout follows its slider");
+    assert.ok(Math.abs(stats4.ink - stats3.ink) > 100, "second axis re-renders outlines");
+    assert.notDeepEqual(layout4.width, layout3.width, "second axis moves layout extents");
+
+    // 4c. Editing text after moving both axes still re-renders shape + layout.
+    const textArea = page.locator("#text");
+    const firstLineWidthBefore = layout4.width[0];
+    await textArea.fill("VVVV");
+    await page.waitForTimeout(250);
+    const stats5 = await canvasStats(page);
+    const layout5 = await readLayout();
+    assert.ok(Math.abs(stats5.ink - stats4.ink) > 100, "text edit re-renders at the current axes");
+    assert.notEqual(layout5.width[0], firstLineWidthBefore, "text edit changes measured layout width");
+    assert.notDeepEqual(layout5.advances, layout4.advances, "text edit changes advanced glyphs");
+    // The axis location survives the text edit (shape cache key includes text).
+    assert.deepEqual(layout5.normalized, layout4.normalized, "axes stay applied after text edit");
+
+    // 4d. Invalid axis input is reported visibly instead of silently applied.
+    const wghtNum = page.locator("#axes .axis").nth(0).locator(".axis-value");
+    await wghtNum.fill("5000");
+    await wghtNum.dispatchEvent("change");
+    await page.waitForTimeout(200);
+    const warnings = await page.locator("#unsupported").textContent();
+    assert.ok(warnings.includes("超出范围"), `out-of-range warning shown: ${warnings}`);
+    const coords5 = await page.locator("#coordTable tbody").textContent();
+    assert.ok(coords5.includes("900") || coords5.includes("62.5"), "clamped value is what was applied");
+
+    // Restore default text for the remaining checks.
+    await textArea.fill("AVATAR é ♥🦄\nTo oooo AVA");
+    await page.waitForTimeout(250);
 
     // 5. Missing and fallback glyphs are counted and marked.
     const missing = Number(await page.locator("#countMissing").textContent());
