@@ -1,0 +1,17 @@
+{
+  "name": "variable-glyph-poster",
+  "version": "0.1.0",
+  "description": "Dynamic glyph poster renderer with a real variable-font engine (fvar/gvar/HVAR/GPOS) and HarfBuzz/fontTools-verified layout",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "test:ui": "node test/ui.smoke.mjs",
+    "serve": "node tools/serve.js",
+    "build:fixtures": "python3 test/fixtures/build_test_font.py",
+    "gen:ref": "python3 test/reference/gen_reference.py"
+  },
+  "license": "OFL-1.1",
+  "devDependencies": {
+    "playwright": "^1.65.1"
+  }
+}

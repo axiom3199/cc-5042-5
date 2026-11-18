@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>动态字形海报渲染器</title>
+<style>
+  :root {
+    --ink: #182233;
+    --accent: #d21f3c;
+    --fallback: #c2571a;
+    --panel: #ffffff;
+    --bg: #e8e4dc;
+    --muted: #6b7280;
+    --line: #d8d3c8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+  }
+  header {
+    padding: 10px 18px;
+    background: var(--ink);
+    color: #fff;
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .font-name { color: #9fb4d8; font-size: 13px; }
+  main { display: flex; gap: 0; min-height: calc(100vh - 44px); }
+  #stage { flex: 1; padding: 18px; overflow: auto; }
+  #poster { box-shadow: 0 2px 14px rgba(0,0,0,.25); cursor: crosshair; max-width: 100%; }
+  #panel {
+    width: 340px;
+    flex: none;
+    background: var(--panel);
+    border-left: 1px solid var(--line);
+    padding: 12px 14px 40px;
+    overflow-y: auto;
+    max-height: calc(100vh - 44px);
+  }
+  section { margin-bottom: 18px; }
+  h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--muted);
+    margin: 0 0 8px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 4px;
+  }
+  textarea {
+    width: 100%;
+    min-height: 64px;
+    font: 16px/1.4 inherit;
+    padding: 6px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    resize: vertical;
+  }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row label { width: 64px; flex: none; color: var(--muted); font-size: 13px; }
+  .row input[type="range"] { flex: 1; }
+  .row input[type="number"] {
+    width: 70px;
+    font: 13px inherit;
+    padding: 2px 4px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+  .axis { margin-bottom: 10px; }
+  .axis .axis-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .axis .axis-name { font-weight: 600; }
+  .axis .axis-tag { color: var(--muted); font-size: 12px; margin-left: 6px; }
+  .axis .axis-range { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+  .axis .axis-value { width: 76px; }
+  select, button {
+    font: 13px inherit;
+    padding: 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+  }
+  button:hover { background: #f0ede6; }
+  table.coords { border-collapse: collapse; width: 100%; font-size: 12px; }
+  table.coords th, table.coords td {
+    text-align: right;
+    padding: 2px 6px;
+    border-bottom: 1px solid #eee;
+    font-variant-numeric: tabular-nums;
+  }
+  table.coords th:first-child, table.coords td:first-child { text-align: left; }
+  .warn {
+    background: #fdeaea;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 12px;
+    margin: 6px 0;
+  }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; }
+  .legend span::before {
+    content: "";
+    display: inline-block;
+    width: 10px; height: 10px;
+    margin-right: 5px;
+    border-radius: 2px;
+    background: var(--c);
+  }
+  #inspector { font-size: 12px; }
+  #inspector dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+  #inspector dt { color: var(--muted); }
+  #inspector dd { margin: 0; font-variant-numeric: tabular-nums; word-break: break-all; }
+  .badge {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: #fff;
+    margin-right: 4px;
+  }
+  .badge.missing { background: var(--accent); }
+  .badge.fallback { background: var(--fallback); }
+  #error {
+    position: fixed;
+    bottom: 12px; left: 12px; right: 360px;
+    background: #fdeaea;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    padding: 8px 12px;
+    border-radius: 4px;
+    display: none;
+    z-index: 10;
+  }
+  .hint { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>动态字形海报渲染器</h1>
+  <span class="font-name" id="fontName">加载中…</span>
+</header>
+<main>
+  <div id="stage"><canvas id="poster" width="1200" height="800"></canvas></div>
+  <div id="panel">
+    <section>
+      <h2>文本与排版</h2>
+      <textarea id="text"></textarea>
+      <div class="row"><label>字号</label><input type="range" id="fontSize" min="24" max="260" step="1"><input type="number" id="fontSizeNum" min="8" max="600"></div>
+      <div class="row"><label>行高倍数</label><input type="range" id="lineHeight" min="0.8" max="2.5" step="0.05"><input type="number" id="lineHeightNum" step="0.05"></div>
+      <div class="row"><label>字距 px</label><input type="range" id="letterSpacing" min="-20" max="80" step="0.5"><input type="number" id="letterSpacingNum" step="0.5"></div>
+      <div class="row"><label>对齐</label>
+        <select id="align">
+          <option value="left">左对齐</option>
+          <option value="center">居中</option>
+          <option value="right">右对齐</option>
+        </select>
+      </div>
+    </section>
+    <section>
+      <h2>可变轴（解析自 fvar）</h2>
+      <div id="axes"></div>
+      <div class="row" id="instanceRow" hidden>
+        <label>命名实例</label>
+        <select id="instances" style="flex:1"></select>
+      </div>
+      <div class="row"><button id="resetAxes">恢复默认</button></div>
+      <div id="noAxes" class="hint" hidden>该字体不含可变轴（静态字体），仅渲染真实轮廓。</div>
+    </section>
+    <section>
+      <h2>采用坐标</h2>
+      <div id="unsupported"></div>
+      <table class="coords" id="coordTable">
+        <thead><tr><th>轴</th><th>用户值(截断后)</th><th>归一化(avar 后)</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>字体与缺字</h2>
+      <div class="row">
+        <input type="file" id="upload" accept=".ttf,.otf,.ttc" style="flex:1">
+      </div>
+      <div id="fontList" class="hint"></div>
+      <div class="legend" style="margin-top:6px">
+        <span style="--c:#182233">主字体 <b id="countPrimary">0</b></span>
+        <span style="--c:#c2571a">回退字体 <b id="countFallback">0</b></span>
+        <span style="--c:#d21f3c">缺字 <b id="countMissing">0</b></span>
+      </div>
+    </section>
+    <section>
+      <h2>字形检查（点击画布）</h2>
+      <div id="inspector"><p class="hint">点击画布中的字形查看其实际信息。</p></div>
+    </section>
+    <section>
+      <h2>视图</h2>
+      <div class="row"><label><input type="checkbox" id="showMetrics"> 显示度量参考线</label></div>
+      <div class="row"><button id="export">导出 PNG</button></div>
+    </section>
+  </div>
+</main>
+<div id="error"></div>
+<script type="module" src="src/ui/main.js"></script>
+</body>
+</html>
